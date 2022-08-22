@@ -8,8 +8,11 @@
 #define HASH_GET_PROC 0x4ee7f7c0d11acdac    // GetProcAddress
 
 VOID FindKernel32(VOID);
+PVOID LocateFunction(LPCSTR, LPCSTR);
 DWORD64 HashString(PVOID, INT);
-PVOID LocateFunction(LPSTR, LPSTR);
 
-typedef HMODULE _LoadLibraryA(LPCSTR);
-typedef PVOID _GetProcAddress(HMODULE, LPCSTR);
+typedef HMODULE LOAD_LIBRARY_A(LPCSTR);
+typedef PVOID GET_PROC_ADDRESS(HMODULE, LPCSTR);
+
+typedef LOAD_LIBRARY_A *PLOAD_LIBRARY_A;
+typedef GET_PROC_ADDRESS *PGET_PROC_ADDRESS;

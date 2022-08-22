@@ -1,6 +1,8 @@
 #include <windows.h>
 #include "find-kernel32.h"
 
-typedef int _MessageBoxA(HWND, LPCSTR, LPCSTR, UINT);
+typedef int MESSAGE_BOX_A(HWND, LPCSTR, LPCSTR, UINT);
 
-_MessageBoxA *fMessageBoxA = NULL;
+typedef MESSAGE_BOX_A *PMESSAGE_BOX_A;
+
+PMESSAGE_BOX_A fMessageBoxA = NULL;
