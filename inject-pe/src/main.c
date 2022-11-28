@@ -2,7 +2,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("usage: %s DLL FUNC_NAME\n", argv[0]);
+        printf("usage: %s DLL_PATH FUNC_NAME [PID]\n", argv[0]);
         return 1;
     }
 
@@ -11,6 +11,38 @@ int main(int argc, char *argv[]) {
 
     if (!pRawPE) {
         return 1;
+    }
+
+    HANDLE remoteProcess = NULL;
+    if (argc >= 4) {
+        DWORD pid = atoi(argv[3]);
+        remoteProcess = OpenProcess(OPEN_PROCESS_ACCESS_FLAGS, FALSE, pid);
+
+        if (remoteProcess == NULL) {
+            DWORD error = GetLastError();
+
+            if (error == ERROR_ACCESS_DENIED) {
+                printf("Access denied when opening remote process\n");
+            }
+            else if (error == ERROR_INVALID_PARAMETER) {
+                printf("Invalid remote process ID\n");
+            }
+            else {
+                printf("Error 0x%x when opening process\n", error);
+            }
+            return 1;
+        }
+
+        PROCESS_MACHINE_INFORMATION processInfo;
+        memset(&processInfo, 0, sizeof(PROCESS_MACHINE_INFORMATION));
+
+        GetProcessInformation(remoteProcess, ProcessMachineTypeInfo, &processInfo, sizeof(PROCESS_MACHINE_INFORMATION));
+
+        if (processInfo.ProcessMachine != IMAGE_FILE_MACHINE_AMD64) {
+            printf("Remote process is not 64 bit\n");
+            return 1;
+        }
+
     }
 
     PIMAGE_DOS_HEADER pDOSHeader = (PIMAGE_DOS_HEADER)pRawPE;
@@ -32,26 +64,34 @@ int main(int argc, char *argv[]) {
     PIMAGE_OPTIONAL_HEADER64 pOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)&pNTHeader->OptionalHeader;
 
     //================================================================================================
-    //Relocate section headers
+    //Relocate and expand section headers
 
-    PBYTE pVirtualPE = VirtualAlloc(NULL, pOptionalHeader64->SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    PBYTE pVirtualPE = VirtualAlloc(NULL,
+                                    pOptionalHeader64->SizeOfImage,
+                                    MEM_COMMIT | MEM_RESERVE,
+                                    PAGE_EXECUTE_READWRITE);
 
     memcpy(pVirtualPE, pRawPE, pOptionalHeader64->SizeOfHeaders);
 
     //================================================================================================
-    //Relocate section bodies
+    //Relocate and expand section bodies
 
-    PIMAGE_SECTION_HEADER pSectionHead = (PIMAGE_SECTION_HEADER)( (PBYTE)pOptionalHeader64 + sizeof(IMAGE_OPTIONAL_HEADER64) );
-
-    //get first section header in new PE so we can edit it
-    pSectionHead = (PIMAGE_SECTION_HEADER)( (PBYTE)pSectionHead - pRawPE + pVirtualPE );
+    PIMAGE_SECTION_HEADER pSectionHead = (PIMAGE_SECTION_HEADER)( (PBYTE)pOptionalHeader64 + sizeof(IMAGE_OPTIONAL_HEADER64) - pRawPE + pVirtualPE);
 
     for (DWORD i = 0; i < pFileHeader->NumberOfSections; i++) {
         memcpy(pVirtualPE + pSectionHead->VirtualAddress,
                 pRawPE + pSectionHead->PointerToRawData,
                 pSectionHead->SizeOfRawData);
 
+        //set these pointers equal so the bin can be dumped
         pSectionHead->PointerToRawData = pSectionHead->VirtualAddress;
+
+        // or you could zero them
+        /*
+        pSectionHead->VirtualAddress = 0;
+        pSectionHead->PointerToRawData = 0;
+        pSectionHead->SizeOfRawData = 0;
+        */
 
         pSectionHead++;
     }
@@ -59,16 +99,32 @@ int main(int argc, char *argv[]) {
     //================================================================================================
     //Do base relocations
 
+    PVOID newBaseAddress;
+
+    if (remoteProcess != NULL) {
+        newBaseAddress = VirtualAllocEx(remoteProcess,
+                                        NULL,
+                                        pOptionalHeader64->SizeOfImage,
+                                        MEM_COMMIT | MEM_RESERVE,
+                                        PAGE_EXECUTE_READWRITE);
+    }
+    else {
+        //load in this process instead
+        newBaseAddress = pVirtualPE;
+    }
+
     PIMAGE_DATA_DIRECTORY pRelocDataDir = &pOptionalHeader64->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 
-    // first of some number of relocation blocks
-    // https://stackoverflow.com/questions/17436668/how-are-pe-base-relocations-build-up
+    //first of some number of relocation blocks
+    //https://stackoverflow.com/questions/17436668/how-are-pe-base-relocations-build-up
 
     PIMAGE_BASE_RELOCATION pRelocTable = (PIMAGE_BASE_RELOCATION)((PBYTE)pVirtualPE + pRelocDataDir->VirtualAddress);
 
     PIMAGE_BASE_RELOCATION pRelocEnd = (PIMAGE_BASE_RELOCATION)((PBYTE)pRelocTable + pRelocDataDir->Size);
 
     while (pRelocTable < pRelocEnd) {
+        // each block begins with a header struct containing VirtualAddress and SizeOfBlock
+        // following the header is an array of WORDs, the length of which can be calculated given the size of the block
         DWORD numMembers = (pRelocTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
 
         PWORD members = (PWORD)((PBYTE)pRelocTable + sizeof(IMAGE_BASE_RELOCATION));
@@ -79,13 +135,26 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
+            /* each member is a 16 bit field
+               the low 12 bits are an offset relative to VirtualAddress in the block header pRelocTable
+               first translate this RVA to a pointer */
             PDWORD64 pRelocAddr = (PDWORD64)(pVirtualPE + pRelocTable->VirtualAddress + (members[i] & 0x0fff));
 
-                                                                        //get value of pointer
-            *pRelocAddr = *pRelocAddr - pOptionalHeader64->ImageBase + *(PDWORD64)&pVirtualPE;
+            //then rebase the address at this pointer
+            *pRelocAddr = *pRelocAddr - pOptionalHeader64->ImageBase + (DWORD64)newBaseAddress;
         }
 
+        //get pointer to next block at the end of this one
         pRelocTable = (PIMAGE_BASE_RELOCATION)((PBYTE)pRelocTable + pRelocTable->SizeOfBlock);
+    }
+
+    if (remoteProcess != NULL && !WriteProcessMemory(remoteProcess,
+                                                     newBaseAddress,
+                                                     pVirtualPE,
+                                                     pOptionalHeader64->SizeOfImage,
+                                                     NULL)) {
+        printf("WriteProcessMemory failed\n");
+        return 1;
     }
 
     //================================================================================================
@@ -96,22 +165,35 @@ int main(int argc, char *argv[]) {
     PIMAGE_EXPORT_DIRECTORY pExportDir = (PIMAGE_EXPORT_DIRECTORY)((PBYTE)pVirtualPE + pExportDataDir->VirtualAddress);
 
     PDWORD exportNamesRVA = (PDWORD)((PBYTE)pVirtualPE + pExportDir->AddressOfNames);
-    PDWORD exportAddrRVA = (PDWORD)((PBYTE)pVirtualPE + pExportDir->AddressOfFunctions);
+    PDWORD exportAddrRVA  = (PDWORD)((PBYTE)pVirtualPE + pExportDir->AddressOfFunctions);
+
+    _entryPoint *entryPoint = NULL;
 
     for (DWORD i = 0; i < pExportDir->NumberOfFunctions; i++) {
 
         LPSTR exportName = (LPSTR)((PBYTE)pVirtualPE + exportNamesRVA[i]);
 
         if (!strcmp(exportName, entryPointName)) {
-            _entryPoint *entryPoint = (PVOID)((PBYTE)pVirtualPE + exportAddrRVA[i]);
-            entryPoint(NULL);
+            entryPoint = (PVOID)((PBYTE)newBaseAddress + exportAddrRVA[i]);
             break;
         }
     }
 
+    if (remoteProcess != NULL) {
+        CreateRemoteThread(remoteProcess,
+                           NULL,
+                           0,
+                           (LPTHREAD_START_ROUTINE)entryPoint,
+                           NULL,
+                           0,
+                           NULL);
+    }
+    else {
+        entryPoint();
+    }
+
     return 0;
 }
-
 
 PVOID LoadPE(LPSTR szPath) {
     HANDLE hOpenFile;

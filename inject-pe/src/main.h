@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SIZE_OF_NT_SIGNATURE 4
+#define OPEN_PROCESS_ACCESS_FLAGS PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE
 
 PVOID LoadPE(LPSTR);
 
-typedef PVOID _entryPoint(PVOID);
+typedef PVOID _entryPoint();
