@@ -1,10 +1,9 @@
 #include "find-kernel32.h"
 
-PLOAD_LIBRARY_A fLoadLibraryA = NULL;
-PGET_PROC_ADDRESS fGetProcAddress = NULL;
+PLOAD_LIBRARY_A loadLibraryA = NULL;
+PGET_PROC_ADDRESS getProcAddress = NULL;
 
-VOID FindKernel32(VOID)
-{
+VOID FindKernel32(VOID) {
     PPEB peb = (PPEB)__readgsqword(TEB_PPEB_OFFSET64);
 
     PPEB_LDR_DATA ldr = peb->Ldr;
@@ -21,11 +20,11 @@ VOID FindKernel32(VOID)
                                 //LDR_DATA_TABLE_ENTRY::BaseDllName isnt defined in winternl.h
         PUNICODE_STRING dllName = (PUNICODE_STRING)&ldrEntry->Reserved4;
 
-        if (HashString(dllName->Buffer, sizeof(WCHAR)) == HASH_KERNEL32) {
+        if (WStrCmp(dllName->Buffer, L"KERNEL32.DLL")) {
             kernel32Base = ldrEntry->DllBase;
             break;
         }
-        
+
         ldrListEntry = ldrListEntry->Flink;
     }
 
@@ -46,44 +45,34 @@ VOID FindKernel32(VOID)
 
         LPSTR exportName = (LPSTR)(kernel32Base + exportNamesRVA[i]);
 
-        DWORD64 hash = HashString(exportName, sizeof(CHAR));
-
-        if (hash == HASH_LOAD_LIB) {
-            fLoadLibraryA = (PVOID)(kernel32Base + exportAddrRVA[i]);
+        if (StrCmp(exportName, "LoadLibraryA")) {
+            loadLibraryA = (PVOID)(kernel32Base + exportAddrRVA[i]);
         }
 
-        else if (hash == HASH_GET_PROC) {
-            fGetProcAddress = (PVOID)(kernel32Base + exportAddrRVA[i]);
+        else if (StrCmp(exportName, "GetProcAddress")) {
+            getProcAddress = (PVOID)(kernel32Base + exportAddrRVA[i]);
         }
     }
 }
 
 PVOID LocateFunction(LPCSTR module, LPCSTR function) {
-    return fGetProcAddress( fLoadLibraryA(module), function );
+    return getProcAddress( loadLibraryA(module), function );
 }
 
-DWORD64 HashString(PVOID buff, INT charWidth) {
-    // https://stackoverflow.com/questions/14409466/simple-hash-functions
-
-    DWORD64 hash = 1234;
-
-    if (charWidth == sizeof(CHAR)) {
-        LPSTR cBuff = buff;
-        
-        while (*cBuff != 0) {
-            hash = ((hash << 5) + hash) + *cBuff;
-            cBuff++;
+BOOL StrCmp(LPSTR s1, LPSTR s2) {
+    while (*s1 != 0 && *s2 != 0) {
+        if (*s1++ != *s2++) {
+            return FALSE;
         }
     }
+    return TRUE;
+}
 
-    else if (charWidth == sizeof(WCHAR)) {
-        LPWSTR wBuff = buff;
-
-        while (*wBuff != 0) {
-            hash = ((hash << 5) + hash) + *wBuff;
-            wBuff++;
+BOOL WStrCmp(LPWSTR s1, LPWSTR s2) {
+    while (*s1 != 0 && *s2 != 0) {
+        if (*s1++ != *s2++) {
+            return FALSE;
         }
     }
-
-    return hash;
+    return TRUE;
 }
