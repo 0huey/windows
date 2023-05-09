@@ -1,4 +1,4 @@
-Experiementing with passing arbitrary data in HTTP Cookie headers.
+Experimenting with passing arbitrary data in HTTP Cookie headers.
 
 ```
 GET /test HTTP/1.1
